@@ -1,0 +1,399 @@
+tring OWNER = NULL_KEY;
+integer DIALOG_MAX_AGENTS = 9; // No need for to many of these
+integer dialog_channel;
+integer listen_id; 
+
+list all_agents = [];
+string target_name = "";
+list all_keys = [];
+key target_key = NULL_KEY;
+
+integer target_handle = 0;
+integer await = 1;
+integer awaiting = 0;
+
+float LIMIT = 60.0;         // Approximate limit (lower bound) of llMoveToTarget
+
+float scan_rate = 1.0;          // .5 recommended Seconds between blinks; lower for more lag
+float scan_rate_ceil = 2.0;
+float scan_rate_floor = 0.2;
+float scan_rate_step = 0.2;
+float scan_rate_awaiting = 20;
+float scan_rate_saved = 0;
+
+float distance = 4.0;       // Meters away that we stop walking towards
+float distance_ceil = 20.0;
+float distance_floor = 1.0;
+float distance_step = 2.0;
+
+float pace = 3.0;           // Make smaller for more rushed following
+float pace_ceil = 6.0;
+float pace_floor = 1.0;
+float pace_step = 0.5;
+
+string btn_verbosity = "Verbose";
+string btn_check = " .";
+string btn_config = "CONFIG »";
+string btn_stop = ":: STOP ::";
+string btn_reset = ":: RESET ::";
+string btn_rescan = ":: RESCAN ::";
+string btn_back = "« BACK";
+string btn_empty = " ";
+string btn_scan_rate_more = "Scan Rate . ";
+string btn_scan_rate_less = "Scan Rate .";
+string btn_distance_more = "Distance . ";
+string btn_distance_less = "Distance .";
+string btn_pace_more = "Pace . ";
+string btn_pace_less = "Pace .";
+string btn_await = "Await";
+
+integer verbosity = 1;
+integer enter_config_menu = 0; 
+
+reset() {
+    scan_rate = 0.5;
+    distance = 3.0;
+    pace = 4.0;
+    
+    distance_step = 4.0;
+    pace_step = 0.5;
+    scan_rate_step = 0.1;
+}
+
+// Level 0 does not print
+// Level 1 is for user verbosity level
+// Level 2 is for programmer debuging actions
+// Level 3 is for variable level output
+printv(integer level, string msg) {
+    if (verbosity && level <= verbosity) {
+        llOwnerSay(msg);
+    }
+}
+
+show_config_menu() {
+    string msg = "\n";
+    string btn_verbosity_toggle;
+    string btn_await_toggle;
+
+    msg += "* Distance (" + number_format(distance, 1) + "): the distance follow\n";
+    msg += "* Pace (" + number_format(pace, 1) + "): pace towards target\n";
+    msg += "* Scan Rate (" + number_format(scan_rate, 1) + "): how often to calculate target position in seconds; the lower the number, the greater the lag.\n";
+    msg += "* Verbose: display actions in chat\n";
+    msg += "* Await: stop following or await when target is out of range";
+
+    btn_verbosity_toggle = btn_verbosity;
+    if(verbosity > 0) {
+        btn_verbosity_toggle += btn_check;
+    }
+    
+    btn_await_toggle = btn_await;
+    if(await == 1) {
+        btn_await_toggle += btn_check;
+    }
+
+    list menu = [];
+
+    menu = (menu = []) + menu + [btn_back]+ [btn_empty]+ [btn_reset];
+
+    menu = (menu = []) + menu + [btn_verbosity_toggle] + [btn_await_toggle] + [btn_empty];
+    
+    menu = (menu = []) + menu + [btn_distance_less];
+    menu = (menu = []) + menu + [btn_pace_less];
+    menu = (menu = []) + menu + [btn_scan_rate_less];
+
+    menu = (menu = []) + menu + [btn_distance_more];
+    menu = (menu = []) + menu + [btn_pace_more];
+    menu = (menu = []) + menu + [btn_scan_rate_more];
+
+    llDialog(OWNER, msg, menu, dialog_channel);
+}
+
+show_agents_menu() {
+    string msg = "Select an agent from the list.";
+
+    llDialog(OWNER, msg, [btn_config] + [btn_stop] + [btn_rescan] + all_agents, dialog_channel);
+    listen_id = llListen(dialog_channel, "", OWNER, "");
+}
+
+stop_following() {
+    target_key = NULL_KEY;
+    llTargetRemove(target_handle);
+    llStopMoveToTarget();
+    llSetTimerEvent(0.0);
+    llTargetOmega(<0.0, 0.0, 0.0>, 0.0, 0.0);
+}
+
+start_following(key id, string name) {
+    target_key = id;
+    target_name = name;
+    printv(1,"Following " + target_name + " .");
+    continue_following();
+
+    llTargetOmega(<1.0, 0.0, 0.0>, 1, 2.0);
+    llSetTimerEvent(scan_rate);
+}
+
+continue_following() {
+    list object_position;
+    vector target_position;
+    float target_distance;
+
+    llTargetRemove(target_handle);
+    llStopMoveToTarget();
+
+    object_position = llGetObjectDetails(target_key, [OBJECT_POS]);
+
+    if (llGetListLength(object_position) == 0) {
+        if(await) {
+            if(! awaiting) {
+                printv(1, target_name + " is out of range, adjusting scan rate to " + number_format(scan_rate_awaiting,1) + " seconds and awaiting ." );
+                scan_rate_saved = scan_rate;
+                scan_rate = scan_rate_awaiting;
+                awaiting = 1;
+                llTargetOmega(<0.0, 0.0, 0.0>, 0.0, 0.0);
+            }
+            else { 
+                printv(1, target_name + " still out of range, awaiting .");
+            }
+            llSetTimerEvent(scan_rate);
+        }
+        else {
+            printv(1, target_name + " is out of range, no longer following .");
+            stop_following();
+        }
+    }
+    else {
+        if(awaiting) {
+            awaiting = 0;
+            scan_rate = scan_rate_saved;;
+            printv(1, target_name + " has entered radar range, following .");
+            llSetTimerEvent(scan_rate);
+            llTargetOmega(<1.0, 0.0, 0.0>, 1, 2.0);
+        }
+        
+        target_position = llList2Vector(object_position, 0);
+        target_distance = llVecDist(target_position, llGetPos());
+
+        if (target_distance > distance) {
+            printv(2, "Target distance is " + (string)target_distance);
+            target_handle = llTarget(target_position, distance);
+
+            if (target_distance > LIMIT) {
+                printv(2, "distance is greater than " + (string)LIMIT);
+                target_position = llGetPos() + LIMIT * llVecNorm(target_position - llGetPos()) ;
+            }
+
+            printv(3, "target_pos " + (string) target_position);
+            llMoveToTarget(target_position, pace);
+        }
+    }
+}
+
+string number_format(float number, integer precision) {
+    float roundingValue = llPow(10, -precision) * 0.5;
+    float rounded;
+
+    if (number < 0) rounded = number - roundingValue;
+    else rounded = number + roundingValue;
+
+    if (precision < 1) // Rounding integer value
+    {
+        integer intRounding = (integer)llPow(10, -precision);
+        rounded = (integer)rounded / intRounding * intRounding;
+        precision = -1; // Don't truncate integer value
+    }
+
+    string strNumber = (string)rounded;
+    return llGetSubString(strNumber, 0, llSubStringIndex(strNumber, ".") + precision);
+}
+
+default {
+    state_entry() {
+        OWNER = llGetOwner();
+        dialog_channel = (-1 * (integer) ("0x" + llGetSubString((string) llGetKey(), -5, -1)));
+    }
+
+    touch_start(integer total_number) {
+        if (llDetectedKey(0) == OWNER) {
+            if( target_key != NULL_KEY ) {
+                stop_following( );
+            }
+            enter_config_menu = 0;
+            llSensor("", "", AGENT, 92, PI);
+        }
+    }
+    listen(integer channel, string name, key id, string choice) {
+        if (enter_config_menu) {
+            if(choice == btn_empty) { }
+            
+            else if (choice == btn_back) {
+                enter_config_menu = 0;
+                llSensor("", "", AGENT, 92, PI);
+            }
+            else {
+                if (choice == btn_scan_rate_more) {
+                    if (scan_rate < scan_rate_ceil) {
+                        scan_rate += scan_rate_step;
+
+                        if (scan_rate > scan_rate_ceil) {
+                            scan_rate = scan_rate_ceil;
+                        }
+
+                        printv(1,"Scan Rate increased to " + number_format(scan_rate, 1));
+                    }
+                    else {
+                        printv(1,"Maximum scan rate of " + number_format(scan_rate_ceil, 1) + " reached");
+                    }
+                }
+                else if (choice == btn_scan_rate_less) {
+                    if (scan_rate > scan_rate_floor) {
+                        scan_rate -= scan_rate_step;
+
+                        if (scan_rate < scan_rate_floor) {
+                            scan_rate = scan_rate_floor;
+                        }
+
+                        printv(1,"Scan Rate decreased to " + number_format(scan_rate, 1));
+                    }
+                    else {
+                        printv(1,"Minimum scan rate of " + number_format(scan_rate_floor, 1) + " reached");
+                    }
+                }
+                else if (choice == btn_distance_more) {
+                    if (distance < distance_ceil) {
+                        distance += distance_step;
+
+                        if (distance > distance_ceil) {
+                            distance = distance_ceil;
+                        }
+
+                        printv(1,"Distance increased to " + number_format(distance, 1));
+                    }
+                    else {
+                        printv(1,"Maximum distance of " + number_format(distance_ceil, 1) + " reached");
+                    }
+                }
+                else if (choice == btn_distance_less) {
+                    if (distance > distance_floor) {
+                        distance -= distance_step;
+
+                        if (distance < distance_floor) {
+                            distance = distance_floor;
+                        }
+
+                        printv(1,"Distance decreased to " + number_format(distance, 1));
+                    }
+                    else {
+                        printv(1,"Minimum distance of " + number_format(distance_floor, 1) + " reached");
+                    }
+                }
+                else if (choice == btn_pace_more) {
+                    if (pace < pace_ceil) {
+                        pace += pace_step;
+
+                        if (pace > pace_ceil) {
+                            pace = pace_ceil;
+                        }
+
+                        printv(1,"Pace increased to " + number_format(pace, 1));
+                    }
+                    else {
+                        printv(1,"Maximum pace of " + number_format(pace_ceil, 1) + " reached");
+                    }
+                }
+                else if (choice == btn_pace_less) {
+                    if (pace > pace_floor) {
+                        pace -= pace_step;
+
+                        if (pace < pace_floor) {
+                            pace = pace_floor;
+                        }
+
+                        printv(1,"Pace decreased to " + number_format(pace, 1));
+                    }
+                    else {
+                        printv(1,"Minimum pace of " + number_format(pace_floor, 1) + " reached");
+                    }
+                }
+                else if(choice == btn_verbosity + btn_check) {
+                    verbosity = 0;
+                    printv(1,"Verbose mode deactivated");
+                }
+                else if(choice == btn_verbosity) {
+                    verbosity = 1;
+                    printv(1,"Verbose mode activated");
+                }
+                else if(choice == btn_await + btn_check) {
+                    await = 0;
+                    printv(1,"Await mode deactivated");
+                }
+                else if(choice == btn_await) {
+                    await = 1;
+                    printv(1,"Await mode activated");
+                }
+                else if(choice == btn_reset) {
+                    reset();
+                }
+                show_config_menu();
+            }
+        }
+        else {
+            if(choice == btn_rescan) {
+                llSensor("", "", AGENT, 92, PI);   
+            }
+            else if (choice == btn_stop) {
+                stop_following();
+            }
+            else if (choice == btn_config) {
+                enter_config_menu = 1;
+                show_config_menu();
+            }
+            else {
+                start_following(llList2Key(all_keys, llListFindList(all_agents, [choice])), choice);
+                llListenRemove(listen_id);
+            }
+        }
+    }
+    sensor(integer num_detected) {
+        string this_agent = "";
+        key this_key = NULL_KEY;
+        integer i;
+        all_agents = [];
+        all_keys = [];
+
+        for (i = 0; i < num_detected && i < DIALOG_MAX_AGENTS; i++) {
+            this_key = llDetectedKey(i);
+            this_agent = llDetectedName(i);
+
+            if (this_key != OWNER) {
+                if (llListFindList(all_agents, [this_agent]) < 0) {
+                    all_agents += (all_agents = []) + all_agents + [llGetSubString(this_agent, 0, 23)];
+                    all_keys += (all_keys = []) + all_keys + [this_key];
+                }
+            }
+        }
+
+        if (llGetListLength(all_agents) > 0) {
+            show_agents_menu();
+        }
+        else {
+            printv(1, "No agents currently in range");
+        }
+    }
+    timer() {
+        continue_following();
+    }
+    at_target(integer tnum, vector tpos, vector ourpos) {
+        llTargetRemove(tnum);
+        llStopMoveToTarget();
+    }
+
+    no_sensor() {
+        printv(1, "No agents currently in range");
+    }
+
+    on_rez(integer x) {
+        OWNER = llGetOwner();
+        stop_following();
+    }
+}
